@@ -14,26 +14,38 @@ class Net(nn.Module):
         super(Net, self).__init__()
         self.hidden_neurons=[]
         self.input=nn.Conv2d(1, 1, 5, 1)
-        for neuron in range(neurons):
+        self.edge_count = initial_edges
+        for _ in range(neurons):
             self.hidden_neurons.append(nn.Conv2d(1, 1, 5, 1))
             
         self.fc1 = nn.Linear(4*4*50, 500)
         self.fc2 = nn.Linear(500, 10)
-        self.incidence_matrix=np.random.randint(low=-1,high=1,size=(initial_edges,neurons+2))
+        self.incidence_matrix=np.zeros(shape=(self.edge_count,neurons+2,2))
+        for row_i in range(len(self.incidence_matrix[:,0])):
+            target_neuron=np.random.choice(range(1,neurons+2),size=1)
+            source_neuron=np.random.choice(np.delete(range(0,neurons+1),target_neuron),size=1)
+            self.incidence_matrix[row_i,target_neuron,0]=1
+            self.incidence_matrix[row_i,source_neuron,0]=-1
         
+        
+
+    def process_neuron(self,neuron_i):
         
 
     def forward(self, x):
+        self.data_flow=[0 for  i in range(self.edge_count)]
+        process_neuron(0)
         x=F.relu(self.input(x))
-        for neuron_i in np.where(self.incidence_input)[0]:
-            self.incidence_matrix[neuron_i]=F.relu(self.hidden_neurons[neuron_i].cuda()(x))
+        self.processed_list=np.zeros(neurons+2)
+
+        for neuron_i in np.where(self.incidence_matrix)[0]:
+            self.incidence_matrix[neuron_i]=F.relu(self.hidden_neurons[neuron_i](x))
         #entrada na hidden area
         free_neurons=np.where(self.incidence_matrix[:,neuron_i])
-        for neuron_i in np.where(self.incidence_input)[0]:
+        #for neuron_i in np.where(self.incidence_input)[0]:
             
 
         #encontrar neurons que já tem todas as entradas
-
         x = F.relu(self.conv2(x))
         x = x.view(-1, 4*4*50)
         x = F.relu(self.fc1(x))
@@ -85,7 +97,7 @@ def main():
                         help='learning rate (default: 0.01)')
     parser.add_argument('--momentum', type=float, default=0.5, metavar='M',
                         help='SGD momentum (default: 0.5)')
-    parser.add_argument('--no-cuda', action='store_true', default=False,
+    parser.add_argument('--no-cuda', action='store_true', default=True,
                         help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
@@ -99,7 +111,7 @@ def main():
 
     torch.manual_seed(args.seed)
 
-    device = torch.device("cuda")
+    device = torch.device("cuda" if use_cuda else "cpu")
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
     train_loader = torch.utils.data.DataLoader(
