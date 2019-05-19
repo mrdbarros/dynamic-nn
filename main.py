@@ -10,45 +10,77 @@ import numpy as np
 INPUT_CONNECTIONS=5
 OUTPUT_CONNECTIONS=5
 class Net(nn.Module):
-    def __init__(self,neurons,initial_edges):
+    def __init__(self,initial_neurons,initial_edges):
         super(Net, self).__init__()
-        self.hidden_neurons=[]
-        self.input=nn.Conv2d(1, 1, 5, 1)
+        self.neurons=[]
         self.edge_count = initial_edges
-        for _ in range(neurons):
-            self.hidden_neurons.append(nn.Conv2d(1, 1, 5, 1))
+        self.neuron_count = initial_neurons
+        
             
-        self.fc1 = nn.Linear(4*4*50, 500)
-        self.fc2 = nn.Linear(500, 10)
-        self.incidence_matrix=np.zeros(shape=(self.edge_count,neurons+2,2))
-        for row_i in range(len(self.incidence_matrix[:,0])):
-            target_neuron=np.random.choice(range(1,neurons+2),size=1)
-            source_neuron=np.random.choice(np.delete(range(0,neurons+1),target_neuron),size=1)
+        
+        self.fc2 = nn.Linear(200, 10)
+        self.incidence_matrix=np.zeros(shape=(self.edge_count,self.neuron_count,2))
+        for row_i in range(len(self.incidence_matrix[:,0,0])):
+            target_neuron=np.random.choice(range(1,self.neuron_count),size=1)
+            source_neuron=np.random.choice(np.delete(range(0,self.neuron_count-1),target_neuron),size=1)
             self.incidence_matrix[row_i,target_neuron,0]=1
             self.incidence_matrix[row_i,source_neuron,0]=-1
+
+        for neuron_i in range(self.neuron_count):
+            input_count = len(np.where(self.incidence_matrix[:,neuron_i,0]==1)[0])
+            if input_count ==0:
+                input_count=1
+            if neuron_i == self.neuron_count-1:
+                self.fc1 = nn.Linear(input_count*28*28, 200)
+                self.neurons.append(self.fc1)
+            else:
+                self.neurons.append(nn.Conv2d(input_count, 1, 5, 1,padding=2))
         
         
+        self.prepare_for_new_batch()
 
     def process_neuron(self,neuron_i):
+        if neuron_i >0:
+            input_edges=np.where(self.incidence_matrix[:,neuron_i,0]==1)[0]
+            input_list = np.where(self.incidence_matrix[input_edges,:,0]==-1)[1]
+            composed_input=torch.cat([self.current_output_list[input_neuron] for input_neuron in input_list],1)
+            if neuron_i == self.neuron_count-1:
+                composed_input = composed_input.view(-1, np.prod(composed_input.shape[1:]))
+        else:
+            composed_input = self.input
+
+        self.future_output_list[neuron_i]=F.relu(self.neurons[neuron_i](composed_input))
+
         
+    def prepare_for_new_batch(self):
+        self.future_neuron_process_list = [0]
+        self.current_neuron_process_list = []
+        self.current_output_list=[torch.zeros((64,1,28,28), requires_grad=True) for  i in range(self.neuron_count)]
+        self.future_output_list=self.current_output_list.copy()
 
     def forward(self, x):
-        self.data_flow=[0 for  i in range(self.edge_count)]
-        process_neuron(0)
-        x=F.relu(self.input(x))
-        self.processed_list=np.zeros(neurons+2)
-
-        for neuron_i in np.where(self.incidence_matrix)[0]:
-            self.incidence_matrix[neuron_i]=F.relu(self.hidden_neurons[neuron_i](x))
-        #entrada na hidden area
-        free_neurons=np.where(self.incidence_matrix[:,neuron_i])
-        #for neuron_i in np.where(self.incidence_input)[0]:
+        
+        self.processed_signal=np.zeros(self.neuron_count)
+        self.input=x
+        
+        while not self.processed_signal[-1]:
             
+            self.current_neuron_process_list=self.future_neuron_process_list.copy()
+            self.future_neuron_process_list=[]
+            for current_neuron_i in self.current_neuron_process_list:
+                self.process_neuron(current_neuron_i)
+                self.processed_signal[current_neuron_i]=1
+                edges_updated=np.where(self.incidence_matrix[:,current_neuron_i,0]==-1)[0]
+                neuron_updated=np.where(self.incidence_matrix[edges_updated,:,0]==1)[1]
+                neuron_updated=neuron_updated[self.processed_signal[neuron_updated]==0]
+                
+                self.future_neuron_process_list.extend(neuron_updated)
+                self.future_neuron_process_list=list(set(self.future_neuron_process_list)) #add updated neurons to next neuron process list
+            
+            self.current_output_list=self.future_output_list.copy()
 
         #encontrar neurons que já tem todas as entradas
-        x = F.relu(self.conv2(x))
-        x = x.view(-1, 4*4*50)
-        x = F.relu(self.fc1(x))
+        x = self.current_output_list[-1]
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
     
@@ -56,11 +88,14 @@ def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
+        model.prepare_for_new_batch()
         optimizer.zero_grad()
-        output = model(data)
-        loss = F.nll_loss(output, target)
-        loss.backward()
-        optimizer.step()
+        for _ in range(10): 
+            
+            output = model(data)
+            loss = F.nll_loss(output, target)
+            loss.backward(retain_graph=True)
+            optimizer.step()
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
@@ -129,7 +164,7 @@ def main():
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
 
-    model = Net(20,100).to(device)
+    model = Net(15,50).to(device)
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
     for epoch in range(1, args.epochs + 1):
