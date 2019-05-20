@@ -16,7 +16,7 @@ class Net(nn.Module):
         self.neurons=[]
         self.edge_count = initial_edges
         self.neuron_count = initial_neurons
-        
+        self.share_memory()
             
         
         self.fc2 = nn.Linear(200, 10)
@@ -39,69 +39,82 @@ class Net(nn.Module):
             else:
                 self.neurons.append(nn.Conv2d(input_count, 1, 5, 1,padding=2).cuda())
         
-        
+        mp.set_start_method('spawn')
 
     def process_neuron(self,neuron_i):
         if neuron_i >0:
             input_edges=np.where(self.incidence_matrix[:,neuron_i,0]==1)[0]
             input_list = np.where(self.incidence_matrix[input_edges,:,0]==-1)[1]
-            composed_input=torch.cat([self.current_output_list[input_neuron] for input_neuron in input_list],1)
+            composed_input=torch.cat(tuple(self.current_output_list[input_list]),1).cuda()
             if neuron_i == self.neuron_count-1:
-                composed_input = composed_input.view(-1, np.prod(composed_input.shape[1:]))
+                composed_input = composed_input.view(-1, np.prod(composed_input.shape[1:])).cuda()
         else:
             composed_input = self.input
-
-        self.future_output_list[neuron_i]=F.relu(self.neurons[neuron_i](composed_input))
+        if neuron_i == self.neuron_count-1:
+            self.output_denseforest=F.relu(self.neurons[neuron_i](composed_input)).cuda()
+        else:
+            self.future_output_list[neuron_i]=F.relu(self.neurons[neuron_i](composed_input)).cuda()
         self.processed_signal[neuron_i]=1
         edges_updated=np.where(self.incidence_matrix[:,neuron_i,0]==-1)[0]
         neuron_updated=np.where(self.incidence_matrix[edges_updated,:,0]==1)[1]
-        neuron_updated=neuron_updated[self.processed_signal[neuron_updated]==0]
+        neuron_updated=neuron_updated[np.where(self.processed_signal[neuron_updated]==0)[0]]
         
         self.future_neuron_process_list.extend(neuron_updated)
         self.future_neuron_process_list=list(set(self.future_neuron_process_list)) #add updated neurons to next neuron process list
-
+        #
         
     def prepare_for_new_batch(self,x):
         self.future_neuron_process_list = []
         self.current_neuron_process_list = []
-        self.current_output_list=[torch.zeros(x.shape, requires_grad=True).cuda() for  i in range(self.neuron_count)]
-        self.future_output_list=self.current_output_list.copy()
+        self.current_output_list=torch.zeros((self.neuron_count-1,)+x.shape, requires_grad=True).cuda()
+        self.future_output_list=self.current_output_list.clone()
 
     def forward(self, x):
         
-        self.processed_signal=np.zeros(self.neuron_count)
+        self.processed_signal=torch.zeros(self.neuron_count)
         self.input=x
         self.future_neuron_process_list.extend([0])
-        self.share_memory()
+        processes = []
+        self.teste_in=mp.Queue()
+        self.teste_out=mp.Queue()
+        self.teste_in.put((1))
         while not self.processed_signal[-1]:
             
             self.current_neuron_process_list=self.future_neuron_process_list.copy()
             self.future_neuron_process_list=[]
-            processes = []
+            
             for current_neuron_i in self.current_neuron_process_list:
-                p = mp.Process(target=self.process_neuron(current_neuron_i), args=(current_neuron_i,))
+                p = mp.Process(target=teste_loop, args=(self.teste_in,self.teste_out))
+                p.daemon = True
                 p.start()
                 processes.append(p)
-                #self.process_neuron(current_neuron_i)
-
             for p in processes:
                 p.join() 
+                #self.process_neuron(current_neuron_i)
+
+            # for current_neuron_i in self.current_neuron_process_list:
+            #     self.process_neuron(current_neuron_i)
                 
             
-            self.current_output_list=self.future_output_list.copy()
+            self.current_output_list=self.future_output_list.clone()
 
         #encontrar neurons que já tem todas as entradas
-        x = self.current_output_list[-1]
+        x = self.output_denseforest
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
-    
+
+def teste_loop(teste_in,teste_out):
+    testeInner=teste_in.get()
+    print(str(testeInner))
+    teste_out.put(testeInner)
+
 def train(args, model, device, train_loader, optimizer, epoch):
-    model.share_memory()
+    
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         model.prepare_for_new_batch(data)
         optimizer.zero_grad()
-        for _ in range(20): 
+        for _ in range(50): 
             
             output = model(data)
             loss = F.nll_loss(output, target)
@@ -179,7 +192,7 @@ def main():
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
 
-    model = Net(50,500).to(device)
+    model = Net(10,25).to(device)
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
     for epoch in range(1, args.epochs + 1):
