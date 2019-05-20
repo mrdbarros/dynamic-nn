@@ -16,7 +16,7 @@ class Net(nn.Module):
         self.neurons=[]
         self.edge_count = initial_edges
         self.neuron_count = initial_neurons
-        self.share_memory()
+        
             
         
         self.fc2 = nn.Linear(200, 10)
@@ -41,33 +41,35 @@ class Net(nn.Module):
         
         mp.set_start_method('spawn')
 
-    def process_neuron(self,neuron_i):
-        if neuron_i >0:
-            input_edges=np.where(self.incidence_matrix[:,neuron_i,0]==1)[0]
-            input_list = np.where(self.incidence_matrix[input_edges,:,0]==-1)[1]
-            composed_input=torch.cat(tuple(self.current_output_list[input_list]),1).cuda()
-            if neuron_i == self.neuron_count-1:
-                composed_input = composed_input.view(-1, np.prod(composed_input.shape[1:])).cuda()
-        else:
-            composed_input = self.input
-        if neuron_i == self.neuron_count-1:
-            self.output_denseforest=F.relu(self.neurons[neuron_i](composed_input)).cuda()
-        else:
-            self.future_output_list[neuron_i]=F.relu(self.neurons[neuron_i](composed_input)).cuda()
-        self.processed_signal[neuron_i]=1
-        edges_updated=np.where(self.incidence_matrix[:,neuron_i,0]==-1)[0]
-        neuron_updated=np.where(self.incidence_matrix[edges_updated,:,0]==1)[1]
-        neuron_updated=neuron_updated[np.where(self.processed_signal[neuron_updated]==0)[0]]
+    # def process_neuron(self,neuron_i):
+    #     if neuron_i >0:
+    #         input_edges=np.where(self.incidence_matrix[:,neuron_i,0]==1)[0]
+    #         input_list = np.where(self.incidence_matrix[input_edges,:,0]==-1)[1]
+    #         composed_input=torch.cat(tuple(self.current_output_list[input_list]),1).cuda()
+    #         if neuron_i == self.neuron_count-1:
+    #             composed_input = composed_input.view(-1, np.prod(composed_input.shape[1:])).cuda()
+    #     else:
+    #         composed_input = self.input
+    #     if neuron_i == self.neuron_count-1:
+    #         self.output_denseforest=F.relu(self.neurons[neuron_i](composed_input)).cuda()
+    #     else:
+    #         self.future_output_list[neuron_i]=F.relu(self.neurons[neuron_i](composed_input)).cuda()
+    #     self.processed_signal[neuron_i]=1
+    #     edges_updated=np.where(self.incidence_matrix[:,neuron_i,0]==-1)[0]
+    #     neuron_updated=np.where(self.incidence_matrix[edges_updated,:,0]==1)[1]
+    #     neuron_updated=neuron_updated[np.where(self.processed_signal[neuron_updated]==0)[0]]
         
-        self.future_neuron_process_list.extend(neuron_updated)
-        self.future_neuron_process_list=list(set(self.future_neuron_process_list)) #add updated neurons to next neuron process list
+    #     self.future_neuron_process_list.extend(neuron_updated)
+    #     self.future_neuron_process_list=list(set(self.future_neuron_process_list)) #add updated neurons to next neuron process list
         #
         
     def prepare_for_new_batch(self,x):
         self.future_neuron_process_list = []
         self.current_neuron_process_list = []
-        self.current_output_list=torch.zeros((self.neuron_count-1,)+x.shape, requires_grad=True).cuda()
+        self.current_output_list=torch.zeros((self.neuron_count-1,)+x.shape, requires_grad=True).cuda(async=True)
+
         self.future_output_list=self.current_output_list.clone()
+        self.future_output_list.share_memory_()
 
     def forward(self, x):
         
@@ -75,23 +77,26 @@ class Net(nn.Module):
         self.input=x
         self.future_neuron_process_list.extend([0])
         processes = []
-        self.teste_in=mp.Queue()
-        self.teste_out=mp.Queue()
-        self.teste_in.put((1))
+        self.neuron_queue=mp.Queue()
+        self.processed_neuron_queue=mp.Queue()
+        self.output_list_queue=mp.Queue()
         while not self.processed_signal[-1]:
             
             self.current_neuron_process_list=self.future_neuron_process_list.copy()
             self.future_neuron_process_list=[]
+            self.neuron_queue.put(tuple(self.current_output_list[0]))
+            current_output_list_clone=self.current_output_list.detach()
+            #self.current_output_list_clone.share_memory_()
+            mp.spawn(process_neuron, args=(current_output_list_clone,),nprocs=len(self.current_neuron_process_list))
             
-            for current_neuron_i in self.current_neuron_process_list:
-                p = mp.Process(target=teste_loop, args=(self.teste_in,self.teste_out))
-                p.daemon = True
-                p.start()
-                processes.append(p)
-            for p in processes:
-                p.join() 
-                #self.process_neuron(current_neuron_i)
-
+            for _ in range(len(self.current_neuron_process_list)):
+                current_neuron_i,neuron_updated,output_tensor,is_forestoutput= self.processed_neuron_queue.get()
+                self.future_neuron_process_list.extend(neuron_updated)
+                self.future_neuron_process_list=list(set(self.future_neuron_process_list)) #add updated neurons to next neuron process list
+                if is_forestoutput:
+                    self.output_denseforest=output_tensor
+                else:
+                    self.future_output_list[current_neuron_i]=output_tensor
             # for current_neuron_i in self.current_neuron_process_list:
             #     self.process_neuron(current_neuron_i)
                 
@@ -103,10 +108,31 @@ class Net(nn.Module):
         x = self.fc2(x)
         return F.log_softmax(x, dim=1)
 
-def teste_loop(teste_in,teste_out):
-    testeInner=teste_in.get()
-    print(str(testeInner))
-    teste_out.put(testeInner)
+def process_neuron(neuron_queue):
+    neuron_queue = model.neuron_queue
+    processed_neuron_queue= model.processed_neuron_queue
+    neuron_i = neuron_queue.get()
+    is_forestoutput=False
+    if neuron_i >0:
+        input_edges=np.where(model.incidence_matrix[:,neuron_i,0]==1)[0]
+        input_list = np.where(model.incidence_matrix[input_edges,:,0]==-1)[1]
+        composed_input=torch.cat(tuple(model.current_output_list[input_list]),1).cuda()
+        if neuron_i == model.neuron_count-1:
+            composed_input = composed_input.view(-1, np.prod(composed_input.shape[1:])).cuda()
+    else:
+        composed_input = model.input
+    if neuron_i == model.neuron_count-1:
+        output_tensor=F.relu(model.neurons[neuron_i](composed_input)).cuda()
+        is_forestoutput=True
+    else:
+        output_tensor=F.relu(model.neurons[neuron_i](composed_input)).cuda()
+        
+    edges_updated=np.where(model.incidence_matrix[:,neuron_i,0]==-1)[0]
+    neuron_updated=np.where(model.incidence_matrix[edges_updated,:,0]==1)[1]
+    neuron_updated=neuron_updated[np.where(model.processed_signal[neuron_updated]==0)[0]]
+    processed_neuron_queue.put((neuron_i,neuron_updated,output_tensor,is_forestoutput))
+    del neuron_i
+    
 
 def train(args, model, device, train_loader, optimizer, epoch):
     
